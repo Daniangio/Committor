@@ -12,7 +12,7 @@ from potential import MullerBrown
 from model import SmallNet
 from sampler import LangevinSampler
 from losses import calculate_losses
-from utils.plotting import plot_results, plot_iteration_feedback # Import the new function
+from utils.plotting import plot_results, plot_iteration_feedback
 
 def main():
     """Main training loop."""
@@ -46,27 +46,29 @@ def main():
             bias_grad_fn = None
             print("Running initial unbiased sampling...")
         else:
-            # Bias from the paper: V_K = - (lambda/beta) * log(|grad(q)|^2)
-            # The force is -grad(V_K). This requires second derivatives of z.
-            model.eval() # Set model to eval mode for inference
+            # The bias potential V_K uses the committor q directly.
+            # V_K = - (lambda/beta) * log(|grad(q)|^2)
+            # The biasing force is -grad(V_K), which requires second derivatives of q.
+            model.eval()
             def bias_grad_fn(x_in):
                 x = x_in.clone().requires_grad_(True)
-                _, _, q_pred, _ = model(x) # Get z_pred for bias calculation
-
+                _, _, q_pred, _ = model(x)
+                
                 # First gradient of q
                 dq = grad(q_pred, x, grad_outputs=torch.ones_like(q_pred), create_graph=True)[0]
                 dq_norm2 = torch.sum(dq**2, dim=1)
-
+                
                 # Log of the squared norm
-                log_dq_norm2 = torch.log(dq_norm2 + 1e-8) # Add epsilon for stability
-
-                # Gradient of the log-term, which is grad(V_K) scaled by constants
+                log_dq_norm2 = torch.log(dq_norm2 + 1e-8) # Epsilon for stability
+                
+                # Gradient of the log-term, which is proportional to grad(V_K)
                 grad_log_term = grad(log_dq_norm2, x, grad_outputs=torch.ones_like(log_dq_norm2), create_graph=False)[0]
-
+                
                 # grad(V_K) = - (lambda/beta) * grad(log(|grad(q)|^2))
                 bias_gradient = - (cfg.LAMBDA_BIAS / cfg.BETA) * grad_log_term
                 return bias_gradient
-            print("Running adaptively biased sampling with Kolmogorov bias...")
+
+            print("Running adaptively biased sampling with direct Kolmogorov bias on q...")
 
         # 2. Generate new samples
         new_samples = sampler.sample(cfg.N_SAMPLES_PER_ITER, initial_pos=[cfg.A_CENTER, cfg.B_CENTER], bias_grad_fn=bias_grad_fn)
@@ -78,23 +80,23 @@ def main():
         if iteration == 0:
             new_weights = torch.ones(new_samples.size(0), device=cfg.DEVICE)
         else:
-            # weight = exp(beta * V_K)
-            # We need to compute V_K for the new samples. This requires gradients.
             new_samples.requires_grad_(True)
-            _, z_values, q_values, _ = model(new_samples)
-            # We need to re-enable grad temporarily to compute dq
-            with torch.enable_grad():
-                dq = grad(q_values, new_samples, grad_outputs=torch.ones_like(q_values), create_graph=False)[0]
             
+            _, _, q_values, _ = model(new_samples)
+            dq = grad(q_values, new_samples, grad_outputs=torch.ones_like(q_values), create_graph=False)[0]    
             dq_norm2 = torch.sum(dq**2, dim=1)
+            
             v_bias = - (cfg.LAMBDA_BIAS / cfg.BETA) * torch.log(dq_norm2 + 1e-8)
             new_weights = torch.exp(cfg.BETA * v_bias).detach()
-            new_samples = new_samples.detach() # Detach after computing gradients
+            new_samples = new_samples.detach()
         
         # 5. Aggregate data
-        all_samples = torch.cat([all_samples, new_samples], dim=0)
-        all_weights = torch.cat([all_weights, new_weights], dim=0)
+        all_samples = new_samples
+        all_weights = new_weights
         
+        # Clip weights to prevent the remaining numerical instabilities from dominating the loss
+        max_weight = 100.0
+        all_weights.clamp_(max=max_weight)
         all_weights /= all_weights.mean()
         
         print(f"Total samples: {all_samples.size(0)}, Mean weight: {all_weights.mean():.4f}")

@@ -28,7 +28,7 @@ B_CENTER = np.array([0.623, 0.028])
 RADIUS = 0.12 # Radius for defining boundary regions A and B
 
 # --- Sampling Parameters ---
-BETA = 0.1  # Inverse temperature (1/kT)
+BETA = 0.05  # Inverse temperature (1/kT)
 N_SAMPLES_PER_ITER = 2000 # Number of samples to generate in each adaptive iteration
 LANGEVIN_DT = 1e-5         # Timestep for Langevin dynamics
 LANGEVIN_N_STEPS = 5000    # Number of steps per trajectory
@@ -46,15 +46,15 @@ BATCH_SIZE = 1024
 HIDDEN_UNITS = 160
 
 # Loss function weights
-W_EIK = 1.0     # Eikonal loss
+W_EIK = 0.0     # Eikonal loss
 W_COMM = 1.0    # Committor loss (weighted Dirichlet energy)
 W_BOUND = 1.0   # Boundary conditions
-W_LINK = 0.1    # Link between g and q
-W_NONNEG = 1.0  # Penalty for g < 0
+W_LINK = 0.    # Link between g and q
+W_NONNEG = 0.0  # Penalty for g < 0
 
 # Adaptive sampling bias strength
 # This lambda controls how strongly we bias towards the transition state (q=0.5)
-LAMBDA_BIAS = 1.0
+LAMBDA_BIAS = 1.5
 
 # --- Visualization ---
 GRID_NX, GRID_NY = 120, 120 # Resolution for plotting grids
