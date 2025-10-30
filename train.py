@@ -1,39 +1,66 @@
 # train.py
 # Main script to orchestrate the iterative training and sampling process.
+# REFACTORED: Implements static biasing, decoupled losses, and separate data handling.
 
 import torch
-from torch.autograd import grad
-import numpy as np
 import time
+import os
+import datetime
 
 # Import project modules
 import config as cfg
 from potential import MullerBrown
 from model import SmallNet
 from sampler import LangevinSampler
-from losses import calculate_losses
-from utils.plotting import plot_results, plot_iteration_feedback
+from losses import calculate_variational_losses, calculate_boundary_loss
+from plotting import plot_results, plot_iteration_feedback, plot_sampling_feedback
+from bias import BiasManager, OPESBias, KolmogorovBias
 
 def main():
     """Main training loop."""
+    # --- Experiment Setup ---
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    experiment_dir = os.path.join("experiments", f"run_{timestamp}")
+    iteration_plot_dir = os.path.join(experiment_dir, "iteration_plots")
+    os.makedirs(iteration_plot_dir, exist_ok=True)
+    print(f"Saving results to: {os.path.abspath(experiment_dir)}")
+
     # --- Initialization ---
     potential = MullerBrown(device=cfg.DEVICE)
     model = SmallNet().to(cfg.DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.LEARNING_RATE)
     sampler = LangevinSampler(
-        potential=potential,
-        beta=cfg.BETA,
-        dt=cfg.LANGEVIN_DT,
-        n_steps=cfg.LANGEVIN_N_STEPS,
-        n_walkers=cfg.N_WALKERS,
-        record_stride=cfg.LANGEVIN_RECORD_STRIDE,
-        device=cfg.DEVICE
+        potential=potential, beta=cfg.BETA, dt=cfg.LANGEVIN_DT,
+        n_steps=cfg.LANGEVIN_N_STEPS, N_WALKERS=cfg.N_WALKERS,
+        record_stride=cfg.LANGEVIN_RECORD_STRIDE, device=cfg.DEVICE
     )
 
-    # --- Data Storage ---
-    all_samples = torch.empty((0, 2), device=cfg.DEVICE)
-    all_weights = torch.empty(0, device=cfg.DEVICE)
+    # --- Bias Setup ---
+    bias_manager = BiasManager(model=model, device=cfg.DEVICE)
+    cv_func = lambda x: model(x)[1]
+    
+    if cfg.OPES_ENABLED:
+        opes_bias = OPESBias(
+            cv_func=cv_func, bias_factor=cfg.OPES_BIAS_FACTOR,
+            kernel_sigma=cfg.OPES_KERNEL_SIGMA, device=cfg.DEVICE
+        )
+        bias_manager.add_bias(opes_bias)
+        
+    if cfg.LAMBDA_KOLMOGOROV > 0:
+        kolmogorov_bias = KolmogorovBias(
+            lambda_k=cfg.LAMBDA_KOLMOGOROV, device=cfg.DEVICE
+        )
+        bias_manager.add_bias(kolmogorov_bias)
 
+    # --- Data Generation for Boundary Conditions ---
+    print("\n--- Generating initial unbiased dataset for boundary conditions ---")
+    unbiased_samples = sampler.sample(cfg.N_SAMPLES_UNBIASED_INITIAL, initial_pos=[cfg.A_CENTER, cfg.B_CENTER])
+    unbiased_dataset = torch.utils.data.TensorDataset(unbiased_samples)
+    unbiased_loader = torch.utils.data.DataLoader(unbiased_dataset, batch_size=cfg.BATCH_SIZE, shuffle=True)
+    print(f"Generated {len(unbiased_dataset)} unbiased samples.")
+
+    # --- Data Storage for Biased Data ---
+    latest_biased_samples = None
     start_time = time.time()
 
     # --- Iterative Training and Sampling Loop ---
@@ -41,102 +68,82 @@ def main():
         iteration_num = iteration + 1
         print(f"\n--- Iteration {iteration_num}/{cfg.N_ITERATIONS} ---")
 
-        # 1. Define the biasing potential gradient based on the current model
-        if iteration == 0:
-            bias_grad_fn = None
-            print("Running initial unbiased sampling...")
-        else:
-            # The bias potential V_K uses the committor q directly.
-            # V_K = - (lambda/beta) * log(|grad(q)|^2)
-            # The biasing force is -grad(V_K), which requires second derivatives of q.
-            model.eval()
-            def bias_grad_fn(x_in):
-                x = x_in.clone().requires_grad_(True)
-                _, _, q_pred, _ = model(x)
-                
-                # First gradient of q
-                dq = grad(q_pred, x, grad_outputs=torch.ones_like(q_pred), create_graph=True)[0]
-                dq_norm2 = torch.sum(dq**2, dim=1)
-                
-                # Log of the squared norm
-                log_dq_norm2 = torch.log(dq_norm2 + 1e-8) # Epsilon for stability
-                
-                # Gradient of the log-term, which is proportional to grad(V_K)
-                grad_log_term = grad(log_dq_norm2, x, grad_outputs=torch.ones_like(log_dq_norm2), create_graph=False)[0]
-                
-                # grad(V_K) = - (lambda/beta) * grad(log(|grad(q)|^2))
-                bias_gradient = - (cfg.LAMBDA_BIAS / cfg.BETA) * grad_log_term
-                return bias_gradient
+        # 1. Update biases with samples from the *previous* iteration
+        model.eval()
+        print("Updating bias states for current iteration...")
+        # For on-the-fly OPES, this just resets the state. For others, it might use samples.
+        bias_manager.update_all_states(latest_biased_samples) 
 
-            print("Running adaptively biased sampling with direct Kolmogorov bias on q...")
+        # 2. Generate new samples using the updated bias manager
+        print("Running biased sampling...")
+        new_samples = sampler.sample(cfg.N_SAMPLES_PER_ITER, initial_pos=[cfg.A_CENTER, cfg.B_CENTER], bias_manager=bias_manager)
+        latest_biased_samples = new_samples.detach().clone()
 
-        # 2. Generate new samples
-        new_samples = sampler.sample(cfg.N_SAMPLES_PER_ITER, initial_pos=[cfg.A_CENTER, cfg.B_CENTER], bias_grad_fn=bias_grad_fn)
+        # 3. Plot sampling feedback
+        plot_sampling_feedback(model, potential, new_samples, iteration_num, bias_manager, output_dir=iteration_plot_dir)
 
-        # 3. *** PLOT ITERATION FEEDBACK ***
-        plot_iteration_feedback(model, potential, new_samples, iteration_num)
+        # 4. Calculate importance weights for training
+        x_grad = new_samples.clone().requires_grad_(True)
+        v_biases = bias_manager.calculate_bias_potential(x_grad)
+        v_total_bias = v_biases['total'].detach()
+        new_weights = torch.exp(cfg.BETA * v_total_bias).detach()
+        
+        # Clip and normalize weights for stable training
+        max_weight = torch.quantile(new_weights, 0.99) if new_weights.numel() > 10 else 1000.0
+        new_weights.clamp_(max=max_weight)
+        new_weights /= new_weights.mean()
+        
+        print(f"Generated {new_samples.size(0)} biased samples. Mean weight: {new_weights.mean():.4f}")
 
-        # 4. Calculate importance weights for the new samples
-        if iteration == 0:
-            new_weights = torch.ones(new_samples.size(0), device=cfg.DEVICE)
-        else:
-            new_samples.requires_grad_(True)
-            
-            _, _, q_values, _ = model(new_samples)
-            dq = grad(q_values, new_samples, grad_outputs=torch.ones_like(q_values), create_graph=False)[0]    
-            dq_norm2 = torch.sum(dq**2, dim=1)
-            
-            v_bias = - (cfg.LAMBDA_BIAS / cfg.BETA) * torch.log(dq_norm2 + 1e-8)
-            new_weights = torch.exp(cfg.BETA * v_bias).detach()
-            new_samples = new_samples.detach()
-        
-        # 5. Aggregate data
-        all_samples = new_samples
-        all_weights = new_weights
-        
-        # Clip weights to prevent the remaining numerical instabilities from dominating the loss
-        max_weight = 100.0
-        all_weights.clamp_(max=max_weight)
-        all_weights /= all_weights.mean()
-        
-        print(f"Total samples: {all_samples.size(0)}, Mean weight: {all_weights.mean():.4f}")
-        
         # --- Inner Training Loop ---
-        dataset = torch.utils.data.TensorDataset(all_samples, all_weights)
-        loader = torch.utils.data.DataLoader(dataset, batch_size=cfg.BATCH_SIZE, shuffle=True)
+        biased_dataset = torch.utils.data.TensorDataset(new_samples, new_weights)
+        biased_loader = torch.utils.data.DataLoader(biased_dataset, batch_size=cfg.BATCH_SIZE, shuffle=True)
         
         for epoch in range(1, cfg.N_EPOCHS_PER_ITER + 1):
             model.train()
-            for batch_samples, batch_weights in loader:
-                batch_samples.requires_grad_(True)
-                
-                v_batch = potential.potential(batch_samples)
-                
-                dist_A = torch.linalg.norm(batch_samples - torch.tensor(cfg.A_CENTER, device=cfg.DEVICE), axis=-1)
-                dist_B = torch.linalg.norm(batch_samples - torch.tensor(cfg.B_CENTER, device=cfg.DEVICE), axis=-1)
-                masks = {'A': dist_A < cfg.RADIUS, 'B': dist_B < cfg.RADIUS}
+            # Cycle through unbiased loader to match batches
+            unbiased_iter = iter(unbiased_loader)
+            
+            for batch_samples, batch_weights in biased_loader:
+                try:
+                    batch_unbiased, = next(unbiased_iter)
+                except StopIteration:
+                    unbiased_iter = iter(unbiased_loader)
+                    batch_unbiased, = next(unbiased_iter)
 
-                optimizer.zero_grad()
-                losses = calculate_losses(model, batch_samples, v_batch, masks, batch_weights)
+                # --- Variational Loss on Biased Data ---
+                batch_samples.requires_grad_(True)
+                v_batch = potential.potential(batch_samples)
+                var_losses = calculate_variational_losses(model, batch_samples, v_batch, batch_weights)
                 
-                losses['total'].backward()
+                # --- Boundary Loss on Unbiased Data ---
+                dist_A = torch.linalg.norm(batch_unbiased - torch.tensor(cfg.A_CENTER, device=cfg.DEVICE), axis=-1)
+                dist_B = torch.linalg.norm(batch_unbiased - torch.tensor(cfg.B_CENTER, device=cfg.DEVICE), axis=-1)
+                masks = {'A': dist_A < cfg.RADIUS, 'B': dist_B < cfg.RADIUS}
+                boundary_loss = calculate_boundary_loss(model, batch_unbiased, masks)
+                
+                # --- Total Loss and Optimization Step ---
+                total_loss = var_losses['total_variational'] + cfg.W_UNBIASED_BOUND * boundary_loss
+                
+                optimizer.zero_grad()
+                total_loss.backward()
                 optimizer.step()
 
-            if epoch % 200 == 0:
-                l_tot = losses['total'].item()
-                l_eik = losses['eikonal'].item()
-                l_com = losses['committor'].item()
-                l_bnd = losses['boundary'].item()
-                l_lnk = losses['link'].item()
-                l_non = losses['nonneg'].item()
-                print(f"  Epoch {epoch}/{cfg.N_EPOCHS_PER_ITER} | Loss: {l_tot:.3e} "
-                      f"[Eik: {l_eik:.2e}, Comm: {l_com:.2e}, Bound: {l_bnd:.2e}, Link: {l_lnk:.2e}, Nonneg: {l_non:.2e}]")
+            if epoch % cfg.LOG_LOSS_EVER_N_EPOCHS == 0:
+                l_tot = total_loss.item()
+                l_var = var_losses['total_variational'].item()
+                l_bnd = boundary_loss.item()
+                print(f"  Epoch {epoch}/{cfg.N_EPOCHS_PER_ITER} | Total Loss: {l_tot:.3e} "
+                      f"[Variational: {l_var:.3e}, Boundary: {l_bnd:.3e}]")
+
+        # 6. Plot training feedback
+        plot_iteration_feedback(model, potential, iteration_num, output_dir=iteration_plot_dir)
 
     end_time = time.time()
     print(f"\nTraining complete in {end_time - start_time:.2f} seconds.")
 
     # --- Final Evaluation and Visualization ---
-    plot_results(model, potential, all_samples)
+    plot_results(model, potential, latest_biased_samples, bias_manager, output_dir=experiment_dir)
 
 if __name__ == '__main__':
     main()

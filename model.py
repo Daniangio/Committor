@@ -12,18 +12,40 @@ class SmallNet(nn.Module):
     """
     def __init__(self, hidden=cfg.HIDDEN_UNITS):
         super().__init__()
-        self.net = nn.Sequential(
+        # Input normalization layer to scale inputs to [-1, 1]
+        # We register them as buffers so they are moved to the correct device
+        # automatically with .to(device) and are saved with the model state_dict.
+        domain_min = torch.tensor([cfg.X_MIN, cfg.Y_MIN], dtype=torch.float32)
+        domain_max = torch.tensor([cfg.X_MAX, cfg.Y_MAX], dtype=torch.float32)
+        self.register_buffer('domain_min', domain_min)
+        self.register_buffer('domain_max', domain_max)
+        self.register_buffer('domain_range', domain_max - domain_min)
+
+        self.net_g = nn.Sequential(
             nn.Linear(2, hidden),
+            nn.LayerNorm(hidden),
             nn.SiLU(),
             nn.Linear(hidden, hidden),
+            nn.LayerNorm(hidden),
             nn.SiLU(),
             nn.Linear(hidden, hidden),
-            nn.SiLU()
+            nn.LayerNorm(hidden),
+            nn.SiLU(),
+            nn.Linear(hidden, 1)
         )
-        # g is the reaction coordinate or quasipotential (unbounded)
-        self.g_head = nn.Linear(hidden, 1)
-        # z is the logit for the committor q (bounded in [0, 1])
-        self.z_head = nn.Linear(hidden, 1)
+
+        self.net_z = nn.Sequential(
+            nn.Linear(2, hidden),
+            nn.LayerNorm(hidden),
+            nn.SiLU(),
+            nn.Linear(hidden, hidden),
+            nn.LayerNorm(hidden),
+            nn.SiLU(),
+            nn.Linear(hidden, hidden),
+            nn.LayerNorm(hidden),
+            nn.SiLU(),
+            nn.Linear(hidden, 1)
+        )
 
         # A learnable parameter to link g and q via a sigmoid
         self.alpha = nn.Parameter(torch.tensor([1.0]))
@@ -41,9 +63,10 @@ class SmallNet(nn.Module):
                 q (torch.Tensor): The committor probability, shape (N,).
                 alpha (torch.Tensor): The learnable linking parameter.
         """
-        h = self.net(x)
-        g = self.g_head(h).squeeze(-1)
-        # Pass the logit z through a sigmoid to ensure q is in [0, 1]
-        z = self.z_head(h).squeeze(-1)
+        # Normalize input x from [min, max] to [-1, 1]
+        x_normalized = 2 * (x - self.domain_min) / self.domain_range - 1
+
+        g = self.net_g(x_normalized).squeeze(-1)
+        z = self.net_z(x_normalized).squeeze(-1)
         q = torch.sigmoid(z)
         return g, z, q, self.alpha

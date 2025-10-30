@@ -52,16 +52,14 @@ class MullerBrown:
         Returns:
             torch.Tensor: A tensor of shape (N, 2) with the gradient [dV/dx, dV/dy].
         """
-        if not xy.requires_grad:
-            xy.requires_grad_(True)
-            
-        V = self.potential(xy)
+        xy_clone = xy.clone().requires_grad_(True)
+        V = self.potential(xy_clone)
         # torch.autograd.grad computes sum(V), so we can pass it directly
         grad_V = torch.autograd.grad(
             outputs=V,
-            inputs=xy,
+            inputs=xy_clone,
             grad_outputs=torch.ones_like(V),
-            create_graph=True, # Keep graph for higher-order derivatives if needed
-            retain_graph=True
+            create_graph=False,
+            retain_graph=False
         )[0]
         return grad_V
