@@ -1,5 +1,5 @@
 .vscode
-iteration_plots/
+experiments/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

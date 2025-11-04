@@ -7,6 +7,8 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import Normalize
 from torch.autograd import grad
 import os
+import glob
+import imageio
 
 import config as cfg
 
@@ -43,7 +45,7 @@ def plot_sampling_feedback(model, potential, new_samples, iteration, bias_manage
 
     # --- Evaluate biases on the grid ---
     v_biases_grid = bias_manager.calculate_bias_potential(grid_t)
-    V_opes_grid_np = v_biases_grid.get('opes', torch.zeros_like(grid_t[:,0])).cpu().detach().numpy().reshape(cfg.GRID_NY, cfg.GRID_NX)
+    V_opes_grid_np = v_biases_grid.get('opes_flooding', torch.zeros_like(grid_t[:,0])).cpu().detach().numpy().reshape(cfg.GRID_NY, cfg.GRID_NX)
     V_opes_grid_np -= V_opes_grid_np.min()
     V_kolmogorov_grid_np = v_biases_grid.get('kolmogorov', torch.zeros_like(grid_t[:,0])).cpu().detach().numpy().reshape(cfg.GRID_NY, cfg.GRID_NX)
     V_kolmogorov_grid_np -= V_kolmogorov_grid_np.min()
@@ -52,8 +54,10 @@ def plot_sampling_feedback(model, potential, new_samples, iteration, bias_manage
     V_grid = potential.potential(grid_t.detach()).detach().cpu().numpy().reshape(cfg.GRID_NY, cfg.GRID_NX)
 
     # Plot common elements
-    for ax in axes.ravel():
-        ax.contour(XX, YY, V_grid, levels=np.logspace(0, 3, 15), cmap='viridis_r', norm=Normalize(0, 200), alpha=0.5)
+    for i, ax in enumerate(axes.ravel()):
+        # For the first plot, we will render the potential with imshow. For others, use contours.
+        if i > 0:
+            ax.contour(XX, YY, V_grid, levels=np.logspace(0, 3, 15), cmap='plasma', norm=Normalize(0, 200), alpha=0.5)
         circle_A = plt.Circle(cfg.A_CENTER, cfg.RADIUS, color='red', fill=False, lw=2)
         circle_B = plt.Circle(cfg.B_CENTER, cfg.RADIUS, color='blue', fill=False, lw=2)
         ax.add_patch(circle_A)
@@ -63,10 +67,11 @@ def plot_sampling_feedback(model, potential, new_samples, iteration, bias_manage
         ax.set_ylabel('y')
 
     # --- Plot 1: Newly Sampled Distribution ---
-    ax1.hist2d(samples_np[:, 0], samples_np[:, 1], bins=60,
-               range=[[cfg.X_MIN, cfg.X_MAX], [cfg.Y_MIN, cfg.Y_MAX]],
-               cmap='magma', density=True)
-    ax1.set_title(f'Sampled Distribution (N={len(samples_np)})')
+    im1 = ax1.imshow(V_grid, extent=[cfg.X_MIN, cfg.X_MAX, cfg.Y_MIN, cfg.Y_MAX],
+                     origin='lower', cmap='plasma', aspect='auto', norm=Normalize(0, 200))
+    fig.colorbar(im1, ax=ax1, label='Potential V(x)')
+    ax1.scatter(samples_np[:, 0], samples_np[:, 1], s=1, alpha=0.3, c='black')
+    ax1.set_title(f'Sampled Distribution (N={len(samples_np)}) on V(x)')
 
     # --- Plot 2: OPES Biasing Potential ---
     v_min, v_max = np.percentile(V_opes_grid_np[np.isfinite(V_opes_grid_np)], [5, 99]) if np.any(np.isfinite(V_opes_grid_np)) else (0, 1)
@@ -86,6 +91,73 @@ def plot_sampling_feedback(model, potential, new_samples, iteration, bias_manage
     plt.savefig(os.path.join(output_dir, f"sampling_feedback_{iteration:02d}.png"))
     plt.close(fig)
 
+
+def plot_opes_convergence_step(cv_grid, v_bias_new, v_bias_old, max_diff, eq_step, iteration, output_dir):
+    """
+    Generates a plot to visualize a single step of the OPES bias convergence.
+
+    Args:
+        cv_grid (np.ndarray): The CV grid points for the x-axis.
+        v_bias_new (np.ndarray): The new bias potential on the grid.
+        v_bias_old (np.ndarray): The old bias potential on the grid.
+        max_diff (float): The maximum difference between new and old potentials.
+        eq_step (int): The current equilibration step.
+        iteration (int): The main training iteration number.
+        output_dir (str): Directory to save the plot.
+    """
+    fig, ax1 = plt.subplots(figsize=(10, 6), dpi=90)
+
+    # Plot the new and old bias potentials
+    ax1.plot(cv_grid, v_bias_new, label=f'V_bias (step {eq_step})', color='black')
+    ax1.plot(cv_grid, v_bias_old, label=f'V_bias (previous)', color='gray', linestyle='--')
+    ax1.set_xlabel("Collective Variable (z_pred)")
+    ax1.set_ylabel("Bias Potential V_bias", color='black')
+    ax1.tick_params(axis='y', labelcolor='black')
+    ax1.grid(True, linestyle='--', alpha=0.6)
+
+    # Create a second y-axis for the difference
+    ax2 = ax1.twinx()
+    delta_v = np.abs(v_bias_new - v_bias_old)
+    ax2.plot(cv_grid, delta_v, label='|ΔV_bias|', color='crimson', alpha=0.8)
+    ax2.set_ylabel("|ΔV_bias|", color='crimson')
+    ax2.tick_params(axis='y', labelcolor='crimson')
+    # Use a log scale for the difference to see small changes
+    ax2.set_yscale('log')
+    ax2.set_ylim(bottom=1e-4) # Set a reasonable lower limit for log scale
+
+    # Combine legends from both axes
+    lines, labels = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax2.legend(lines + lines2, labels + labels2, loc='upper right')
+
+    fig.suptitle(f'OPES Convergence | Iteration {iteration}, Step {eq_step} | Max Diff: {max_diff:.3e}')
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    plt.savefig(os.path.join(output_dir, f"opes_conv_iter_{iteration:02d}_step_{eq_step:05d}.png"))
+    plt.close(fig)
+
+def create_gif_from_plots(plot_dir, iteration):
+    """
+    Creates a GIF from all OPES convergence plots for a given iteration.
+
+    Args:
+        plot_dir (str): The directory containing the PNG files.
+        iteration (int): The iteration number, used for naming the output GIF.
+    """
+    print(f"  Creating OPES convergence GIF for iteration {iteration}...")
+    # Find all PNG files for the given iteration, sorted by step number
+    search_pattern = os.path.join(plot_dir, f"opes_conv_iter_{iteration:02d}_step_*.png")
+    image_files = sorted(glob.glob(search_pattern))
+
+    if not image_files:
+        print(f"    Warning: No PNG files found in {plot_dir} to create a GIF.")
+        return
+
+    # Read images and create GIF
+    images = [imageio.imread(filename) for filename in image_files]
+    gif_path = os.path.join(plot_dir, f"opes_convergence_iter_{iteration:02d}.gif")
+    
+    imageio.mimsave(gif_path, images, duration=150, loop=0) # duration in ms
+    print(f"  -> Saved convergence GIF to {gif_path}")
 
 def plot_iteration_feedback(model, potential, iteration, output_dir):
     """
@@ -188,7 +260,7 @@ def plot_results(model, potential, final_samples, bias_manager, output_dir):
     
     # Calculate final bias potentials
     v_biases_grid = bias_manager.calculate_bias_potential(grid_t)
-    V_opes_grid_np = v_biases_grid.get('opes', torch.zeros_like(grid_t[:,0])).cpu().detach().numpy().reshape(cfg.GRID_NY, cfg.GRID_NX)
+    V_opes_grid_np = v_biases_grid.get('opes_flooding', torch.zeros_like(grid_t[:,0])).cpu().detach().numpy().reshape(cfg.GRID_NY, cfg.GRID_NX)
     V_opes_grid_np -= V_opes_grid_np.min()
     V_kolmogorov_grid_np = v_biases_grid.get('kolmogorov', torch.zeros_like(grid_t[:,0])).cpu().detach().numpy().reshape(cfg.GRID_NY, cfg.GRID_NX)
     V_kolmogorov_grid_np -= V_kolmogorov_grid_np.min()

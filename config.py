@@ -29,40 +29,45 @@ RADIUS = 0.12 # Radius for defining boundary regions A and B
 
 # --- Sampling Parameters ---
 BETA = 0.05  # Inverse temperature (1/kT)
-N_SAMPLES_PER_ITER = None # Number of samples to generate in each adaptive iteration
-LANGEVIN_DT = 1e-5         # Timestep for Langevin dynamics
-LANGEVIN_N_STEPS = 100    # Number of steps per trajectory
+N_SAMPLES_UNBIASED_INITIAL = 1024 # Number of samples to generate from unbiased dataset for boundary conditions
+N_SAMPLES_PER_ITER = 4096   # Number of samples to generate in each adaptive iteration
+LANGEVIN_DT = 1e-5          # Timestep for Langevin dynamics
+LANGEVIN_N_STEPS = 5000     # Number of steps per trajectory
 LANGEVIN_RECORD_STRIDE = 10 # Record a point every N steps to reduce correlation
-N_WALKERS = 2            # Number of parallel Langevin walkers
+N_WALKERS = 50              # Number of parallel Langevin walkers
 
 # --- Training Parameters ---
 # Iterative refinement settings
 N_ITERATIONS = 5           # Number of adaptive sampling/re-weighting iterations
 N_EPOCHS_PER_ITER = 100    # Number of training epochs for each iteration
 LEARNING_RATE = 1e-3
-BATCH_SIZE = 512
-LOG_LOSS_EVER_N_EPOCHS = 50
-
-# Unbiased dataset for boundary conditions
-N_SAMPLES_UNBIASED_INITIAL = 8192
+BATCH_SIZE = 128
+LOG_LOSS_EVER_N_EPOCHS = 20
 
 # Model architecture
 HIDDEN_UNITS = 256
 
 # --- OPES Biasing Parameters ---
-OPES_ENABLED = True
 # Bias factor (gamma in the paper). Larger gamma -> flatter sampling.
 OPES_BIAS_FACTOR = 50.0
 # Width of the Gaussian kernels for the KDE of the CV distribution.
-OPES_KERNEL_SIGMA = 0.1
+OPES_KERNEL_SIGMA = 0.5
+# The flooding barrier height (Delta E in the paper). This is crucial.
+# It sets the maximum energy up to which the bias will fill.
+# This should be chosen to be less than the true free energy barrier.
+OPES_DELTA_E = 150.0 # Units of kT/BETA
+OPES_CV_MIN = -8.0
+OPES_CV_MAX = 8.0
+OPES_CV_BINS = 400
 
 # On-the-fly OPES parameters
-OPES_STRIDE = 10           # Deposit a new kernel every N steps
-OPES_CONV_TOL = 1e-4       # Convergence tolerance for the max change in bias potential
-OPES_CONV_GRID_PTS = 100   # Number of points to test convergence on
+MAX_OPES_EQUILIBRATION_STEPS = 10000 # Max steps to run for OPES convergence before production
+OPES_STRIDE = 200          # Deposit a new kernel every N steps
+OPES_CONV_TOL = 1e-1       # Convergence tolerance for the max change in bias potential
+OPES_CONV_GRID_PTS = 1000  # Number of points to test convergence on
 
 # Strength of the Kolmogorov bias V_K = - (lambda/beta) * log(|grad q|^2)
-LAMBDA_KOLMOGOROV = 1.0
+W_KOLMOGOROV = 0 # 0.1
 
 
 # --- Loss function weights ---
@@ -76,4 +81,4 @@ W_NONNEG = 1.0  # Penalty for g < 0
 W_UNBIASED_BOUND = 10.0
 
 # --- Visualization ---
-GRID_NX, GRID_NY = 120, 120 # Resolution for plotting grids
+GRID_NX, GRID_NY = 60, 60 # Resolution for plotting grids

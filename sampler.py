@@ -1,17 +1,21 @@
 # sampler.py
 # Implements sampling from a potential using overdamped Langevin dynamics.
+# REFACTORED:
+# 1. Drives the on-the-fly OPES convergence process.
+# 2. Manages two phases: equilibration (building bias) and production (recording samples).
 
 from bias import OPESBias
 import math
 import torch
 import numpy as np
+import os
+from plotting import plot_opes_convergence_step
 import config as cfg
 
 class LangevinSampler:
     """
     Generates samples from a potential energy surface using overdamped Langevin dynamics.
-    The update rule is:
-    x_{t+1} = x_t - (grad(V(x_t)) + grad(V_bias(x_t))) * dt + sqrt(2*dt/beta) * noise
+    Drives the on-the-fly convergence of an OPES bias if provided.
     """
     def __init__(self, potential, beta, dt, n_steps, N_WALKERS, record_stride, device):
         self.potential = potential
@@ -23,18 +27,13 @@ class LangevinSampler:
         self.device = device
         print(f"Langevin Sampler initialized: {N_WALKERS} walkers, {n_steps} steps, dt={dt:.2e}")
 
-    def sample(self, n_samples, initial_pos, bias_manager):
+    def sample(self, n_samples, initial_pos, bias_manager, iteration, experiment_dir):
         """
-        Runs the Langevin simulation to generate samples.
-
-        Args:
-            n_samples (int|None): The total number of samples to return.
-            initial_pos (np.ndarray or list of np.ndarray): The starting position(s).
-            bias_manager (BiasManager): The bias manager to calculate bias forces.
-
-        Returns:
-            torch.Tensor: A tensor of shape (n_samples, 2) containing the samples.
+        Runs the Langevin simulation, managing OPES convergence before sampling.
         """
+        opes_plots_dir = os.path.join(experiment_dir, "opes_convergence", f"iter_{iteration:02d}")
+
+        # --- Walker Initialization ---
         if not isinstance(initial_pos, (list, tuple)):
             initial_pos_list = [initial_pos]
         else:
@@ -53,45 +52,83 @@ class LangevinSampler:
             all_initial_positions_tensors.append(pos_tensor)
         positions = torch.cat(all_initial_positions_tensors, dim=0)
 
-        # Find the on-the-fly OPES bias object, if it exists
-        opes_bias = None
-        if bias_manager:
-            print("  Bias manager provided. Bias forces will be included in dynamics.")
-            for bias in bias_manager.biases:
-                if isinstance(bias, OPESBias):
-                    opes_bias = bias
-                    print("  On-the-fly OPES mode enabled in sampler.")
-                    break
-
-        production_started = False if opes_bias else True
-        samples = []
-
-        for step in range(self.n_steps):
-            force = -self.potential.gradient(positions)
-
-            force += bias_manager.calculate_bias_force(positions)
-
-            noise = torch.randn_like(positions)
-            positions += force * self.dt + math.sqrt(2 * self.dt / self.beta) * noise
-            
-            # --- On-the-fly OPES Logic ---
-            if opes_bias and not opes_bias.is_converged:
-                # Deposit kernels at specified stride
-                if step > 0 and step % cfg.OPES_STRIDE == 0:
-                    opes_bias.add_kernels(positions)
-                    
-                    # Check for convergence after depositing
-                    if opes_bias.check_convergence():
-                        production_started = True
-                        print(f"    Production sampling started at step {step}.")
-            
-            # --- Sample Recording ---
-            # Record samples only during production phase
-            if production_started and step % self.record_stride == 0:
-                samples.append(positions.cpu().clone())
+        # --- Sampler State Setup ---
+        opes_bias = next((b for b in bias_manager.biases if isinstance(b, OPESBias)), None)
         
+        # Flag to track if OPES has converged in the equilibration phase
+        opes_converged_in_equilibration = False
+        last_opes_max_diff = float('inf') # To store the last convergence metric
+        
+        # Use a separate variable for current positions to avoid confusion with initial 'positions'
+        current_positions = positions.clone() 
+
+        samples = []
+        
+        bias_grad_fn = bias_manager.get_bias_grad_fn()
+        
+        print("  Beginning Langevin dynamics...")
+
+        # --- Phase 1: Equilibration (OPES Convergence) ---
+        if opes_bias:
+            os.makedirs(opes_plots_dir, exist_ok=True)
+            print(f"    Running equilibration for OPES bias (max {cfg.MAX_OPES_EQUILIBRATION_STEPS} steps)...")
+            for eq_step in range(1, cfg.MAX_OPES_EQUILIBRATION_STEPS + 1):
+                force = -self.potential.gradient(current_positions)
+                # Bias force during equilibration still uses the current, evolving bias
+                force += bias_grad_fn(current_positions)
+
+                noise = torch.randn_like(current_positions)
+                current_positions += force * self.dt + math.sqrt(2 * self.dt / self.beta) * noise
+
+                if eq_step % cfg.OPES_STRIDE == 0:
+                    opes_bias.add_kernels(current_positions)
+                    conv_data = opes_bias.check_convergence()
+                    last_opes_max_diff = conv_data["max_diff"]
+
+                    # Call the new plotting function
+                    plot_opes_convergence_step(eq_step=eq_step, iteration=iteration, output_dir=opes_plots_dir, **conv_data)
+
+                    if last_opes_max_diff < cfg.OPES_CONV_TOL:
+                        opes_converged_in_equilibration = True
+                        print(f"    OPES bias converged after {eq_step} equilibration steps (max_diff: {last_opes_max_diff:.3e}).")
+                        break
+            
+            if not opes_converged_in_equilibration:
+                print(f"    Warning: OPES bias did not converge within {cfg.MAX_OPES_EQUILIBRATION_STEPS} equilibration steps (last max_diff: {last_opes_max_diff:.3e}).")
+                print(f"    Proceeding to production run with current bias state.")
+        else:
+            print("    No OPES bias configured, skipping equilibration phase.")
+
+        # --- Phase 2: Production (Record Samples) ---
+        print(f"  Running production for {self.n_steps} steps...")
+        
+        for prod_step in range(1, self.n_steps + 1): # Loop for the specified number of production steps
+            force = -self.potential.gradient(current_positions)
+            # Bias force continues to be applied, and OPES continues to update (on-the-fly)
+            force += bias_grad_fn(current_positions) 
+            
+            noise = torch.randn_like(current_positions)
+            current_positions += force * self.dt + math.sqrt(2 * self.dt / self.beta) * noise
+            
+            # OPES continues to update its state even during production, as it's "on-the-fly"
+            if opes_bias and prod_step % cfg.OPES_STRIDE == 0:
+                opes_bias.add_kernels(current_positions)
+                # We don't need to check convergence here to stop production,
+                # as production runs for a fixed self.n_steps.
+                # However, check_convergence updates v_bias_grid_old, so it's good to call it.
+                opes_bias.check_convergence() 
+
+            if prod_step % self.record_stride == 0:
+                samples.append(current_positions.cpu().clone())
+
+        # --- Collate and Subsample Results ---
+        if not samples:
+            return torch.empty(0, 2, device=self.device)
+
         all_samples = torch.cat(samples, dim=0)
         indices = torch.randperm(all_samples.size(0))
-        if n_samples is None:
-            n_samples = all_samples.size(0)
-        return all_samples[indices][::max(1, len(all_samples) // n_samples)].to(self.device).detach()
+        
+        if n_samples is None: # Return all collected production samples
+            return all_samples[indices].to(self.device)
+        else: # Subsample to the desired number
+            return all_samples[indices][::max(1, len(all_samples) // n_samples)].to(self.device)

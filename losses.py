@@ -1,6 +1,6 @@
 # losses.py
 # Defines the components of the total loss function.
-# REFACTORED: Loss calculation is now split into two functions.
+# Loss calculation is split into two functions.
 
 import torch
 from torch.autograd import grad
@@ -33,7 +33,7 @@ def calculate_variational_losses(model, x_t, v_t, weights):
     dg = get_gradients(g_pred, x_t)
     dg_norm = torch.linalg.norm(dg, dim=1)
     res_eik = exp_mbetaV * dg_norm - 1.0
-    # REFACTORED: Eikonal loss is now correctly weighted.
+    # Weighted Eikonal loss.
     L_eik = torch.sum(weights * res_eik**2) / torch.sum(weights)
 
     # --- Committor Loss (Weighted Dirichlet Energy) ---
@@ -43,11 +43,11 @@ def calculate_variational_losses(model, x_t, v_t, weights):
 
     # --- Link Loss ---
     res_link = q_pred - torch.sigmoid(-alpha * g_pred)
-    # REFACTORED: Link loss is now correctly weighted.
+    # Wighted Link loss.
     L_link = torch.sum(weights * res_link**2) / torch.sum(weights)
     
     # --- Non-negativity Loss for g ---
-    # REFACTORED: Non-negativity loss is now correctly weighted.
+    # Weighted non-negativity loss.
     L_nonneg = torch.sum(weights * torch.relu(-g_pred)**2) / torch.sum(weights)
 
     losses = {
