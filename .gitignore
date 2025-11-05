@@ -1,5 +1,6 @@
 .vscode
 experiments/
+ground_truth/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

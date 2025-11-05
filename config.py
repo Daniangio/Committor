@@ -25,10 +25,10 @@ Y_MIN, Y_MAX = -1.0, 3.0
 # Approximate centers for reactant (A) and product (B) basins
 A_CENTER = np.array([-0.558, 1.441])
 B_CENTER = np.array([0.623, 0.028])
-RADIUS = 0.12 # Radius for defining boundary regions A and B
+RADIUS = 0.15 # Radius for defining boundary regions A and B
 
 # --- Sampling Parameters ---
-BETA = 0.05  # Inverse temperature (1/kT)
+BETA = 0.1  # Inverse temperature (1/kT)
 N_SAMPLES_UNBIASED_INITIAL = 1024 # Number of samples to generate from unbiased dataset for boundary conditions
 N_SAMPLES_PER_ITER = 4096   # Number of samples to generate in each adaptive iteration
 LANGEVIN_DT = 1e-5          # Timestep for Langevin dynamics

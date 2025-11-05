@@ -8,6 +8,7 @@ import time
 import os
 import numpy as np
 import datetime
+import argparse
 
 # Import project modules
 import config as cfg
@@ -20,9 +21,26 @@ from bias import BiasManager, OPESBias, KolmogorovBias
 
 def main():
     """Main training loop."""
+    # --- Argument Parsing ---
+    parser = argparse.ArgumentParser(description="Train the committor model.")
+    parser.add_argument('--beta', type=float, default=cfg.BETA,
+                        help=f"Inverse temperature (1/kT). Default: {cfg.BETA}")
+    parser.add_argument('--device', type=str, default=str(cfg.DEVICE),
+                        help=f"Computation device ('cpu', 'cuda'). Default: {cfg.DEVICE}")
+    args = parser.parse_args()
+
+    # --- Update Config from Args ---
+    cfg.BETA = args.beta
+    if args.device == 'cuda' and not torch.cuda.is_available():
+        print(f"Warning: CUDA requested via '--device {args.device}' but not available. Falling back to 'cpu'.")
+        cfg.DEVICE = torch.device('cpu')
+    else:
+        cfg.DEVICE = torch.device(args.device)
+    print(f"Running on device: {cfg.DEVICE} with BETA: {cfg.BETA}")
+
     # --- Experiment Setup ---
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    run_name = f"run_{timestamp}"
+    run_name = f"beta_{cfg.BETA:.3f}_{timestamp}"
     experiment_dir = os.path.join("experiments", run_name)
     bias_output_dir = os.path.join(experiment_dir, "bias_potentials")
     iteration_plot_dir = os.path.join(experiment_dir, "iteration_plots")
