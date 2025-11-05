@@ -31,7 +31,7 @@ class SmallNet(nn.Module):
             nn.Linear(hidden, hidden),
             nn.LayerNorm(hidden),
             nn.SiLU(),
-            nn.Linear(hidden, 1)
+            nn.Linear(hidden, 2)
         )
 
         self.net_z = nn.Sequential(
@@ -67,6 +67,9 @@ class SmallNet(nn.Module):
         x_normalized = 2 * (x - self.domain_min) / self.domain_range - 1
 
         g = self.net_g(x_normalized).squeeze(-1)
+        gA = g[..., 0]
+        gB = g[..., 1]
+
         z = self.net_z(x_normalized).squeeze(-1)
         q = torch.sigmoid(z)
-        return g, z, q, self.alpha
+        return gA, gB, z, q, self.alpha

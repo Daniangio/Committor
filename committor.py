@@ -105,78 +105,80 @@ def calculate_committor_for_grid(potential, grid_points, trajectory_plot_dir):
     b_center_t = torch.tensor(cfg.B_CENTER, device=cfg.DEVICE)
 
     # --- Main Simulation Loop ---
-    for step in range(1, MAX_SIMULATION_STEPS + 1):
-        if not torch.any(active_mask):
-            print(f"    All trajectories finished by step {step}.")
-            break
+    try:
+        for step in range(1, MAX_SIMULATION_STEPS + 1):
+            if not torch.any(active_mask):
+                print(f"\n    All trajectories finished by step {step}.")
+                break
 
-        # Get positions of only the active trajectories.
-        active_positions = positions[active_mask]
+            # Get positions of only the active trajectories.
+            active_positions = positions[active_mask]
 
-        # Calculate forces and update positions using Langevin dynamics.
-        force = -potential.gradient(active_positions)
-        noise = torch.randn_like(active_positions)
-        active_positions += force * DT + noise * noise_factor
+            # Calculate forces and update positions using Langevin dynamics.
+            force = -potential.gradient(active_positions)
+            noise = torch.randn_like(active_positions)
+            active_positions += force * DT + noise * noise_factor
 
-        # Update the main positions tensor.
-        positions[active_mask] = active_positions
+            # Update the main positions tensor.
+            positions[active_mask] = active_positions
 
-        # --- Check for Basin Entry (only every CHECK_STRIDE steps for efficiency) ---
-        if step % CHECK_STRIDE == 0:
-            # --- Check for NaN values after position update ---
-            # This can happen if forces are too large, causing numerical instability.
-            nan_mask = torch.any(torch.isnan(active_positions), dim=1)
-            if torch.any(nan_mask):
-                num_nans = nan_mask.sum().item()
-                # Get the original indices of the trajectories that became NaN
+            # --- Check for Basin Entry (only every CHECK_STRIDE steps for efficiency) ---
+            if step % CHECK_STRIDE == 0:
+                # --- Check for NaN values after position update ---
+                # This can happen if forces are too large, causing numerical instability.
+                nan_mask = torch.any(torch.isnan(active_positions), dim=1)
+                if torch.any(nan_mask):
+                    num_nans = nan_mask.sum().item()
+                    # Get the original indices of the trajectories that became NaN
+                    active_indices = active_mask.nonzero(as_tuple=True)[0]
+                    nan_indices = active_indices[nan_mask]
+
+                    # Deactivate these trajectories
+                    active_mask[nan_indices] = False
+                    # Set their result to NaN so they are ignored in the final average
+                    results[nan_indices] = torch.nan
+                    print(f"  Warning: Removed {num_nans} trajectories at step {step} due to NaN positions.\n", end='')
+
+                    # If we removed any NaNs, we MUST update active_positions to reflect the change
+                    # before proceeding with basin checks. This is the fix.
+                    active_positions = positions[active_mask]
+
+                # Check distances for all active trajectories.
+                dist_A = torch.linalg.norm(active_positions - a_center_t, axis=-1)
+                dist_B = torch.linalg.norm(active_positions - b_center_t, axis=-1)
+
+                # Identify trajectories that have just entered a basin.
+                hit_A = dist_A < cfg.RADIUS
+                hit_B = dist_B < cfg.RADIUS
+
+                # Get the original indices of the active trajectories.
                 active_indices = active_mask.nonzero(as_tuple=True)[0]
-                nan_indices = active_indices[nan_mask]
 
-                # Deactivate these trajectories
-                active_mask[nan_indices] = False
-                # Set their result to NaN so they are ignored in the final average
-                results[nan_indices] = torch.nan
-                print(f"  Warning: Removed {num_nans} trajectories at step {step} due to NaN positions.\n", end='')
+                # Update results and deactivate trajectories that hit basin A.
+                if torch.any(hit_A):
+                    finished_indices_A = active_indices[hit_A]
+                    results[finished_indices_A] = 0.0
+                    active_mask[finished_indices_A] = False
 
-                # If we removed any NaNs, we MUST update active_positions to reflect the change
-                # before proceeding with basin checks. This is the fix.
-                active_positions = positions[active_mask]
+                # Update results and deactivate trajectories that hit basin B.
+                if torch.any(hit_B):
+                    finished_indices_B = active_indices[hit_B]
+                    results[finished_indices_B] = 1.0
+                    active_mask[finished_indices_B] = False
+                
+                num_active = active_mask.sum().item()
+                print(f"    Step {step}/{MAX_SIMULATION_STEPS}: {num_active} trajectories remaining.", end='\r')
 
-            # Check distances for all active trajectories.
-            dist_A = torch.linalg.norm(active_positions - a_center_t, axis=-1)
-            dist_B = torch.linalg.norm(active_positions - b_center_t, axis=-1)
-
-            # Identify trajectories that have just entered a basin.
-            hit_A = dist_A < cfg.RADIUS
-            hit_B = dist_B < cfg.RADIUS
-
-            # Get the original indices of the active trajectories.
-            active_indices = active_mask.nonzero(as_tuple=True)[0]
-
-            # Update results and deactivate trajectories that hit basin A.
-            if torch.any(hit_A):
-                finished_indices_A = active_indices[hit_A]
-                results[finished_indices_A] = 0.0
-                active_mask[finished_indices_A] = False
-
-            # Update results and deactivate trajectories that hit basin B.
-            if torch.any(hit_B):
-                finished_indices_B = active_indices[hit_B]
-                results[finished_indices_B] = 1.0
-                active_mask[finished_indices_B] = False
-            
-            num_active = active_mask.sum().item()
-            print(f"    Step {step}/{MAX_SIMULATION_STEPS}: {num_active} trajectories remaining.", end='\r')
-
-        # --- Plot intermediate positions ---
-        if step % PLOT_STRIDE == 0 and torch.any(active_mask):
-            # We must re-select active_positions as the mask may have changed
-            plot_active_walkers(positions[active_mask], step, V_grid, plot_XX, plot_YY, trajectory_plot_dir)
-
+            # --- Plot intermediate positions ---
+            if step % PLOT_STRIDE == 0 and torch.any(active_mask):
+                # We must re-select active_positions as the mask may have changed
+                plot_active_walkers(positions[active_mask], step, V_grid, plot_XX, plot_YY, trajectory_plot_dir)
+    except KeyboardInterrupt:
+        print("\n\n  Simulation interrupted by user. Proceeding with finished trajectories...")
 
     if torch.any(active_mask):
-        print(f"\n  Warning: {active_mask.sum().item()} trajectories timed out after {MAX_SIMULATION_STEPS} steps.")        
-        # Set timed-out trajectories to NaN to exclude them from the average.
+        print(f"\n  Warning: {active_mask.sum().item()} trajectories were still active and will be excluded from the result.")
+        # Set remaining active trajectories (whether timed-out or interrupted) to NaN.
         results[active_mask] = torch.nan
 
     # Reshape results to (n_points, N_TRAJECTORIES_PER_POINT) and calculate the mean for each point.

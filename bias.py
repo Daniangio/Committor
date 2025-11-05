@@ -42,7 +42,7 @@ class OPESBias(BiasSource):
         super().__init__(device=device)
         self.name = "opes_flooding"
         self.model = model
-        self.cv_func = lambda x: self.model(x)[1] # Use z_pred as the CV
+        self.cv_func = lambda x: self.model(x)[2] # Use z_pred as the CV
 
         if bias_factor < 1.0:
             raise ValueError("Bias factor gamma must be >= 1.0")
@@ -218,8 +218,8 @@ class BiasManager:
 
     def calculate_bias_potential(self, x):
         potentials = {'total': torch.zeros(x.shape[0], device=self.device)}
-        g_pred, z_pred, q_pred, alpha = self.model(x)
-        cvs = {'g_pred': g_pred, 'z_pred': z_pred, 'q_pred': q_pred, 'alpha': alpha}
+        gA_pred, gB_pred, z_pred, q_pred, alpha = self.model(x)
+        cvs = {'g_pred': gA_pred, 'z_pred': z_pred, 'q_pred': q_pred, 'alpha': alpha}
 
         for bias in self.biases:
             if bias.is_built:
@@ -240,7 +240,7 @@ class BiasManager:
 
             # Evaluate the model with x_for_grad to ensure all CVs are part of the graph
             # that leads back to x_for_grad.
-            g_for_grad, z_for_grad, q_for_grad, alpha_for_grad = self.model(x_for_grad)
+            g_for_grad, _, z_for_grad, q_for_grad, alpha_for_grad = self.model(x_for_grad)
 
             cvs_for_grad = {'g_pred': g_for_grad, 'z_pred': z_for_grad, 'q_pred': q_for_grad, 'alpha': alpha_for_grad}
 

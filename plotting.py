@@ -156,7 +156,7 @@ def create_gif_from_plots(plot_dir, iteration):
     images = [imageio.imread(filename) for filename in image_files]
     gif_path = os.path.join(plot_dir, f"opes_convergence_iter_{iteration:02d}.gif")
     
-    imageio.mimsave(gif_path, images, duration=150, loop=0) # duration in ms
+    imageio.mimsave(gif_path, images)
     print(f"  -> Saved convergence GIF to {gif_path}")
 
 def plot_iteration_feedback(model, potential, iteration, output_dir):
@@ -188,10 +188,10 @@ def plot_iteration_feedback(model, potential, iteration, output_dir):
     ax1, ax2, ax3 = axes.ravel()
 
     # --- Evaluate model on the grid ---
-    g_grid, z_grid, q_grid, _ = model(grid_t)
+    gA_grid, _, z_grid, q_grid, _ = model(grid_t)
 
     # Move all grid data to CPU and reshape for plotting
-    g_grid_np = g_grid.detach().cpu().numpy().reshape(cfg.GRID_NY, cfg.GRID_NX)
+    g_grid_np = gA_grid.detach().cpu().numpy().reshape(cfg.GRID_NY, cfg.GRID_NX)
     z_grid_np = z_grid.detach().cpu().numpy().reshape(cfg.GRID_NY, cfg.GRID_NX)
     q_grid_np = q_grid.detach().cpu().numpy().reshape(cfg.GRID_NY, cfg.GRID_NX)
     V_grid = potential.potential(grid_t.detach()).detach().cpu().numpy().reshape(cfg.GRID_NY, cfg.GRID_NX)
@@ -256,7 +256,7 @@ def plot_results(model, potential, final_samples, bias_manager, output_dir):
     # --- Evaluate model, potential, and bias on the grid ---
     V_grid = potential.potential(grid_t.detach()).detach().cpu().numpy().reshape(cfg.GRID_NY, cfg.GRID_NX)
     
-    g_grid, z_grid, q_grid, _ = model(grid_t)
+    g_grid, _, _, q_grid, _ = model(grid_t)
     
     # Calculate final bias potentials
     v_biases_grid = bias_manager.calculate_bias_potential(grid_t)
