@@ -30,7 +30,7 @@ RADIUS = 0.15 # Radius for defining boundary regions A and B
 # --- Sampling Parameters ---
 BETA = 0.1  # Inverse temperature (1/kT)
 N_SAMPLES_UNBIASED_INITIAL = 1024 # Number of samples to generate from unbiased dataset for boundary conditions
-N_SAMPLES_PER_ITER = 8192   # Number of samples to generate in each adaptive iteration
+N_SAMPLES_PER_ITER = 1024 #8192   # Number of samples to generate in each adaptive iteration
 LANGEVIN_DT = 1e-5          # Timestep for Langevin dynamics
 LANGEVIN_N_STEPS = 10000    # Number of steps per trajectory
 LANGEVIN_RECORD_STRIDE = 10 # Record a point every N steps to reduce correlation
@@ -39,10 +39,10 @@ N_WALKERS = 100             # Number of parallel Langevin walkers
 # --- Training Parameters ---
 # Iterative refinement settings
 N_ITERATIONS = 5           # Number of adaptive sampling/re-weighting iterations
-N_EPOCHS_PER_ITER = 250    # Number of training epochs for each iteration
+N_EPOCHS_PER_ITER = 15     # Number of training epochs for each iteration
 LEARNING_RATE = 5e-4
-BATCH_SIZE = 128
-LOG_LOSS_EVER_N_EPOCHS = 20
+BATCH_SIZE = 512
+LOG_LOSS_EVER_N_EPOCHS = 5
 
 # Model architecture
 HIDDEN_UNITS = 256
@@ -61,7 +61,7 @@ OPES_CV_MAX = 10.0
 OPES_CV_BINS = 400
 
 # On-the-fly OPES parameters
-MAX_OPES_EQUILIBRATION_STEPS = 50000 # Max steps to run for OPES convergence before production
+MAX_OPES_EQUILIBRATION_STEPS = 1000 # 500000 # Max steps to run for OPES convergence before production
 OPES_STRIDE = 200          # Deposit a new kernel every N steps
 OPES_CONV_TOL = 1e-3       # Convergence tolerance for the max change in bias potential
 OPES_CONV_GRID_PTS = 1000  # Number of points to test convergence on
@@ -72,13 +72,11 @@ W_KOLMOGOROV = 0.1 # 0.1
 
 # --- Loss function weights ---
 # Variational losses (applied to the biased, reweighted dataset)
-W_EIK = 1.0     # Eikonal loss
+W_EIK = 0.0     # Eikonal loss
 W_COMM = 1.0    # Committor loss (weighted Dirichlet energy)
 W_LINK = 0.     # Link between g and q
-W_NONNEG = 1.0  # Penalty for g < 0
-
-# Boundary loss (applied to the separate, UNBIASED dataset)
-W_UNBIASED_BOUND = 10.0
+W_NONNEG = 0.0  # Penalty for g < 0
+W_BOUND = 10.0  # Boundary loss
 
 # --- Visualization ---
 GRID_NX, GRID_NY = 60, 60 # Resolution for plotting grids

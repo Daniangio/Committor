@@ -1,145 +1,136 @@
 # losses.py
 # Defines the components of the total loss function.
-# Loss calculation is split into two functions.
 
 import torch
 from torch.autograd import grad
 import config as cfg
 
-def get_gradients(model_output, x):
+def _get_gradients(model_output, x, create_graph=True):
     """Helper to compute gradients of a scalar model output w.r.t. input x."""
-    return grad(model_output, x, grad_outputs=torch.ones_like(model_output), create_graph=True)[0]
+    if not x.requires_grad:
+        return torch.zeros_like(x)
+    gradients = grad(model_output, x, grad_outputs=torch.ones_like(model_output), create_graph=create_graph, allow_unused=True)[0]
+    return gradients if gradients is not None else torch.zeros_like(x)
 
-def calculate_variational_losses(model, x_t, v_t, weights):
-    """
-    Calculates all VARIATIONAL components of the loss function on BIASED data.
-    All losses here are correctly weighted by the importance weights.
+def calculate_eikonal_loss(gA_pred, gB_pred, x, v, weights):
+    """Calculates the Eikonal loss for gA and gB."""
+    exp_mbetaV = torch.exp(-cfg.BETA * v)
 
-    Args:
-        model (nn.Module): The neural network model.
-        x_t (torch.Tensor): Training points from biased sampling.
-        v_t (torch.Tensor): Potential values at training points.
-        weights (torch.Tensor): Importance weights for each sample.
-
-    Returns:
-        dict: A dictionary containing all calculated variational loss components.
-    """
-    gA_pred, gB_pred, _, q_pred, alpha = model(x_t)
-
-    # Squeeze outputs just in case model defines them as (batch, 1)
-    gA_pred = gA_pred.squeeze(-1) if gA_pred.ndim > 1 else gA_pred
-    gB_pred = gB_pred.squeeze(-1) if gB_pred.ndim > 1 else gB_pred
-    q_pred = q_pred.squeeze(-1) if q_pred.ndim > 1 else q_pred
-
-    # --- 1. Eikonal Losses (for gA and gB) ---
-    # We want to solve |grad g| = exp(beta * V)
-    # The residual is R(x) = exp(-beta * V) * |grad g| - 1
-    exp_mbetaV = torch.exp(-cfg.BETA * v_t)
-
-    # Eikonal for gA(x) (cost from A)
-    dgA = get_gradients(gA_pred, x_t)
+    # Eikonal for gA(x)
+    dgA = _get_gradients(gA_pred, x)
     dgA_norm = torch.linalg.norm(dgA, dim=1)
     res_eik_gA = (exp_mbetaV * dgA_norm) - 1.0
-    # Average over the p_bias (flat) distribution, NOT p_B (weighted)
-    L_eik_gA = torch.mean(res_eik_gA**2)
+    L_eik_gA = torch.sum(weights * res_eik_gA**2) / torch.sum(weights)
 
-    # Eikonal for gB(x) (cost from B)
-    dgB = get_gradients(gB_pred, x_t)
+    # Eikonal for gB(x)
+    dgB = _get_gradients(gB_pred, x)
     dgB_norm = torch.linalg.norm(dgB, dim=1)
     res_eik_gB = (exp_mbetaV * dgB_norm) - 1.0
-    L_eik_gB = torch.mean(res_eik_gB**2) # Average over p_bias (flat)
+    L_eik_gB = torch.sum(weights * res_eik_gB**2) / torch.sum(weights)
 
-    L_eik = L_eik_gA + L_eik_gB
+    return L_eik_gA + L_eik_gB
 
-    # --- 2. Committor Loss (for q) ---
-    # We minimize the Dirichlet energy K[q] = <|grad q|^2>_p_B
-    # The 'weights' correctly re-weight from p_bias to p_B.
-    dq = get_gradients(q_pred, x_t)
+def calculate_committor_loss(q_pred, x, weights):
+    """Calculates the Committor loss (Dirichlet energy)."""
+    dq = _get_gradients(q_pred, x)
     dq_norm2 = torch.sum(dq**2, dim=1)
-    
-    # This is the observable O(x) = |grad q|^2
-    # We average it over p_B using the importance weights.
-    L_comm = torch.sum(weights * dq_norm2) / torch.sum(weights)
+    return torch.sum(weights * dq_norm2) / torch.sum(weights)
 
-    # --- 3. Link Loss (for self-consistency) ---
-    # Normalize with a safe epsilon
+def calculate_link_loss(gA_pred, q_pred, x, weights):
+    """Calculates the Link loss to enforce self-consistency."""
+    dgA = _get_gradients(gA_pred, x)
+    dq = _get_gradients(q_pred, x)
+
     dg_norm_vec = dgA / (torch.linalg.norm(dgA, dim=1, keepdim=True) + 1e-8)
     dq_norm_vec = dq / (torch.linalg.norm(dq, dim=1, keepdim=True) + 1e-8)
 
-    # Calculate the squared L2 distance between the unit vectors
     res_link = torch.sum((dg_norm_vec - dq_norm_vec)**2, dim=1)
+    return torch.sum(weights * res_link) / torch.sum(weights)
 
-    # Average over the biased, flat distribution (p_bias)
-    L_link = torch.mean(res_link)
-    
-    # # # # We enforce q_pred ≈ sigmoid(alpha * (gA - gB))
-    # # # # We use (gB_pred - gA_pred) so it's negative at A (q=0) and positive at B (q=1)
-    # # # q_derived = torch.sigmoid(alpha.squeeze() * (gB_pred - gA_pred))
+def calculate_nonneg_loss(gA_pred, gB_pred, weights):
+    """Calculates the non-negativity loss for gA and gB."""
+    L_nonneg_gA = torch.sum(weights * torch.relu(-gA_pred)**2) / torch.sum(weights)
+    L_nonneg_gB = torch.sum(weights * torch.relu(-gB_pred)**2) / torch.sum(weights)
+    return L_nonneg_gA + L_nonneg_gB
 
-    # # # # We use a simple MSE loss, averaged over the flat p_bias
-    # # # res_link = (q_pred - q_derived)**2
-    # # # L_link = torch.mean(res_link)
+def calculate_boundary_loss(gA_pred, gB_pred, q_pred):
+    """Calculates the boundary loss for q, gA, and gB."""
+    # This loss is unweighted as it applies only to boundary points
+    # which are sampled from an unbiased distribution.
+    loss_qA = (q_pred**2).mean() # q(A) = 0
+    loss_gA = (gA_pred**2).mean() # gA(A) = 0
+    loss_qB = ((q_pred - 1.0)**2).mean() # q(B) = 1
+    loss_gB = (gB_pred**2).mean() # gB(B) = 0
+    return loss_qA + loss_qB + loss_gA + loss_gB
 
-    # --- 4. Non-negativity Loss (for gA and gB) ---
-    # These are costs, they cannot be negative.
-    L_nonneg_gA = torch.mean(torch.relu(-gA_pred)**2) # Averaged over p_bias
-    L_nonneg_gB = torch.mean(torch.relu(-gB_pred)**2) # Averaged over p_bias
-    L_nonneg = L_nonneg_gA + L_nonneg_gB
-
-    losses = {
-        'eikonal': L_eik,
-        'committor': L_comm,
-        'link': L_link,
-        'nonneg': L_nonneg,
-    }
-    
-    # --- Total Variational Loss ---
-    total_loss = (cfg.W_EIK * L_eik +
-                  cfg.W_COMM * L_comm +
-                  cfg.W_LINK * L_link +
-                  cfg.W_NONNEG * L_nonneg)
-    
-    losses['total_variational'] = total_loss
-    return losses
-
-
-def calculate_boundary_loss(model, x_unbiased, masks):
+def calculate_all_losses(model, x, v, weights, boundary_type):
     """
-    Calculates the boundary loss on a separate, UNBIASED, unweighted dataset.
-    This loss penalizes:
-    - q(x) != 0 for x in A
-    - q(x) != 1 for x in B
-    - g(x) != 0 for x in A (ADDED)
+    Orchestrates the calculation of all loss components on a single data batch.
 
     Args:
         model (nn.Module): The neural network model.
-        x_unbiased (torch.Tensor): Training points from unbiased basin sampling.
-        masks (dict): Dictionary containing boolean masks for regions 'A' and 'B'.
+        x (torch.Tensor): Training points.
+        v (torch.Tensor): Potential values at training points.
+        weights (torch.Tensor): Importance weights for each sample.
+        boundary_type (torch.Tensor): Tensor indicating boundary type (0 for A, 1 for B, NaN for bulk).
 
     Returns:
-        torch.Tensor: The calculated boundary loss.
+        dict: A dictionary containing all loss components and the total loss.
     """
-    # Get both g and q predictions from the model
-    gA_pred, gB_pred, _, q_pred, _ = model(x_unbiased)
-    
-    idx_A = masks['A'].nonzero(as_tuple=True)[0]
-    idx_B = masks['B'].nonzero(as_tuple=True)[0]
-    
-    loss_qA = torch.tensor(0.0, device=cfg.DEVICE)
-    loss_qB = torch.tensor(0.0, device=cfg.DEVICE)
-    loss_gA = torch.tensor(0.0, device=cfg.DEVICE)
-    loss_gB = torch.tensor(0.0, device=cfg.DEVICE)
+    losses = {
+        'eikonal': torch.tensor(0.0, device=cfg.DEVICE),
+        'committor': torch.tensor(0.0, device=cfg.DEVICE),
+        'link': torch.tensor(0.0, device=cfg.DEVICE),
+        'nonneg': torch.tensor(0.0, device=cfg.DEVICE),
+        'boundary': torch.tensor(0.0, device=cfg.DEVICE),
+    }
 
-    if len(idx_A) > 0:
-        qA = q_pred[idx_A]
-        gA = gA_pred[idx_A]
-        loss_qA = (qA**2).mean() # q(A) = 0
-        loss_gA = (gA**2).mean() # gA(A) = 0
-        
-    if len(idx_B) > 0:
-        qB = q_pred[idx_B]
-        gB = gB_pred[idx_B]
-        loss_qB = ((qB - 1.0)**2).mean() # q(B) = 1
-        loss_gB = (gB**2).mean() # gB(B) = 0
-            
-    return loss_qA + loss_qB + loss_gA + loss_gB
+    # --- Partition data into bulk and boundary ---
+    bulk_mask = torch.isnan(boundary_type)
+    boundary_A_mask = (boundary_type == 0.0)
+    boundary_B_mask = (boundary_type == 1.0)
+
+    # --- Calculate Bulk Losses (weighted) ---
+    if torch.any(bulk_mask):
+        x_bulk = x[bulk_mask]
+        v_bulk = v[bulk_mask]
+        w_bulk = weights[bulk_mask]
+
+        gA_bulk, gB_bulk, _, q_bulk, _ = model(x_bulk)
+
+        if cfg.W_EIK > 0:
+            losses['eikonal'] = calculate_eikonal_loss(gA_bulk, gB_bulk, x_bulk, v_bulk, w_bulk)
+        if cfg.W_COMM > 0:
+            losses['committor'] = calculate_committor_loss(q_bulk, x_bulk, w_bulk)
+        if cfg.W_LINK > 0:
+            losses['link'] = calculate_link_loss(gA_bulk, q_bulk, x_bulk, w_bulk)
+        if cfg.W_NONNEG > 0:
+            losses['nonneg'] = calculate_nonneg_loss(gA_bulk, gB_bulk, w_bulk)
+
+    # --- Calculate Boundary Losses (unweighted) ---
+    loss_qA, loss_gA, loss_qB, loss_gB = (torch.tensor(0.0, device=cfg.DEVICE) for _ in range(4))
+
+    if torch.any(boundary_A_mask):
+        x_A = x[boundary_A_mask]
+        gA_A, _, _, q_A, _ = model(x_A)
+        loss_qA = (q_A**2).mean()
+        loss_gA = (gA_A**2).mean()
+
+    if torch.any(boundary_B_mask):
+        x_B = x[boundary_B_mask]
+        _, gB_B, _, q_B, _ = model(x_B)
+        loss_qB = ((q_B - 1.0)**2).mean()
+        loss_gB = (gB_B**2).mean()
+
+    if cfg.W_BOUND > 0:
+        losses['boundary'] = loss_qA + loss_gA + loss_qB + loss_gB
+
+    # --- Combine all losses with their respective weights ---
+    total_loss = (cfg.W_EIK * losses['eikonal'] +
+                  cfg.W_COMM * losses['committor'] +
+                  cfg.W_LINK * losses['link'] +
+                  cfg.W_NONNEG * losses['nonneg'] +
+                  cfg.W_BOUND * losses['boundary'])
+
+    losses['total'] = total_loss
+    return losses

@@ -128,7 +128,7 @@ def plot_opes_convergence_step(cv_grid, v_bias_new, v_bias_old, max_diff, eq_ste
     # Combine legends from both axes
     lines, labels = ax1.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
-    ax2.legend(lines + lines2, labels + labels2, loc='upper right')
+    ax2.legend(lines + lines2, labels + labels2, loc='lower right')
 
     fig.suptitle(f'OPES Convergence | Iteration {iteration}, Step {eq_step} | Max Diff: {max_diff:.3e}')
     plt.tight_layout(rect=[0, 0, 1, 0.96])
@@ -207,28 +207,134 @@ def plot_iteration_feedback(model, potential, iteration, output_dir):
         ax.set_xlabel('x')
         ax.set_ylabel('y')
 
-    # --- Plot 1: Learned Committor q(x) ---
-    im1 = ax1.imshow(q_grid_np, extent=[cfg.X_MIN, cfg.X_MAX, cfg.Y_MIN, cfg.Y_MAX],
-                     origin='lower', cmap='coolwarm', aspect='auto', vmin=0, vmax=1)
-    fig.colorbar(im1, ax=ax1, label='Committor q(x)')
-    ax1.contour(XX, YY, q_grid_np, levels=[0.1, 0.5, 0.9], colors='black', linewidths=1.5)
-    ax1.set_title('Learned Committor q(x)')
-
-    # --- Plot 2: Learned Reaction Coordinate g(x) ---
-    im2 = ax2.imshow(g_grid_np, extent=[cfg.X_MIN, cfg.X_MAX, cfg.Y_MIN, cfg.Y_MAX],
-                     origin='lower', cmap='viridis', aspect='auto')
-    fig.colorbar(im2, ax=ax2, label='Reaction Coordinate g(x)')
-    ax2.set_title('Learned Reaction Coordinate g(x)')
-
-    # --- Plot 3: Learned z(x) (pre-sigmoid for committor) ---
-    im3 = ax3.imshow(z_grid_np, extent=[cfg.X_MIN, cfg.X_MAX, cfg.Y_MIN, cfg.Y_MAX],
+    # --- Plot 1: Learned z(x) (pre-sigmoid for committor) ---
+    im1 = ax1.imshow(z_grid_np, extent=[cfg.X_MIN, cfg.X_MAX, cfg.Y_MIN, cfg.Y_MAX],
                      origin='lower', cmap='bwr', aspect='auto')
-    fig.colorbar(im3, ax=ax3, label='Logit of Committor z(x)')
-    ax3.set_title('Learned z(x) (pre-sigmoid)')
+    fig.colorbar(im1, ax=ax1, label='Logit of Committor z(x)')
+    ax1.set_title('Learned z(x) (pre-sigmoid)')
+    
+    # --- Plot 2: Learned Committor q(x) ---
+    im2 = ax2.imshow(q_grid_np, extent=[cfg.X_MIN, cfg.X_MAX, cfg.Y_MIN, cfg.Y_MAX],
+                     origin='lower', cmap='coolwarm', aspect='auto', vmin=0, vmax=1)
+    fig.colorbar(im2, ax=ax2, label='Committor q(x)')
+    ax2.contour(XX, YY, q_grid_np, levels=[0.1, 0.5, 0.9], colors='black', linewidths=1.5)
+    ax2.set_title('Learned Committor q(x)')
+
+    # --- Plot 3: Learned Reaction Coordinate g(x) ---
+    im3 = ax3.imshow(g_grid_np, extent=[cfg.X_MIN, cfg.X_MAX, cfg.Y_MIN, cfg.Y_MAX],
+                     origin='lower', cmap='viridis', aspect='auto')
+    fig.colorbar(im3, ax=ax3, label='Reaction Coordinate g(x)')
+    ax3.set_title('Learned Reaction Coordinate g(x)')
 
     plt.tight_layout(rect=[0, 0, 1, 0.96])
     plt.savefig(os.path.join(output_dir, f"iteration_feedback_{iteration:02d}.png"))
     plt.close(fig) # Close figure to free memory
+
+def plot_training_data_feedback(model, samples_np, boundary_type_np, output_path, iteration=None):
+    """
+    Generates a plot showing the learned model outputs on the actual training data points.
+    This plot is potential-agnostic.
+
+    Args:
+        model (nn.Module): The trained neural network model.
+        samples_np (np.ndarray): The (N, 2) array of training samples.
+        boundary_type_np (np.ndarray): The (N,) array of boundary types (0 for A, 1 for B, nan for bulk).
+        output_path (str): The full path to save the output plot file.
+        iteration (int, optional): The current iteration number for the plot title. Defaults to None.
+    """
+    if iteration is not None:
+        print(f"  Generating training data feedback plot for iteration {iteration}...")
+        title = f'Training Data Feedback: Iteration {iteration}'
+    else:
+        print("  Generating training data feedback plot...")
+        title = 'Training Data Feedback'
+
+    output_dir = os.path.dirname(output_path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+
+    model.eval()
+
+    # --- Create Figure ---
+    fig, axes = plt.subplots(1, 3, figsize=(21, 6.5), dpi=100)
+    fig.suptitle(title, fontsize=16)
+    ax1, ax2, ax3 = axes.ravel()
+
+    # --- Compute plot ranges from data min/max with a margin ---
+    x_min, x_max = samples_np[:, 0].min(), samples_np[:, 0].max()
+    y_min, y_max = samples_np[:, 1].min(), samples_np[:, 1].max()
+    x_margin = 0 # (x_max - x_min) * 0.1
+    y_margin = 0 # (y_max - y_min) * 0.1
+    plot_xlim = (x_min - x_margin, x_max + x_margin)
+    plot_ylim = (y_min - y_margin, y_max + y_margin)
+    plot_range = [plot_xlim, plot_ylim]
+
+    # --- Estimate basin centers from data ---
+    basin_A_points = samples_np[boundary_type_np == 0.0]
+    basin_B_points = samples_np[boundary_type_np == 1.0]
+
+    # If points exist in the basin, calculate their mean; otherwise, use the config default.
+    center_A = np.mean(basin_A_points, axis=0) if len(basin_A_points) > 0 else cfg.A_CENTER
+    center_B = np.mean(basin_B_points, axis=0) if len(basin_B_points) > 0 else cfg.B_CENTER
+
+    print(f"    Estimated Basin A center: [{center_A[0]:.3f}, {center_A[1]:.3f}] ({len(basin_A_points)} points)")
+    print(f"    Estimated Basin B center: [{center_B[0]:.3f}, {center_B[1]:.3f}] ({len(basin_B_points)} points)")
+
+    # Plot common elements
+    for ax in axes:
+        circle_A = plt.Circle(center_A, cfg.RADIUS, color='red', fill=False, lw=2)
+        circle_B = plt.Circle(center_B, cfg.RADIUS, color='blue', fill=False, lw=2)
+        ax.add_patch(circle_A)
+        ax.add_patch(circle_B)
+        ax.set_aspect('equal')
+        ax.set_xlabel('x')
+        ax.set_ylabel('y')
+        ax.set_xlim(plot_xlim)
+        ax.set_ylim(plot_ylim)
+
+    # --- Plot 1: Training Data Density ---
+    im1 = ax1.hist2d(samples_np[:, 0], samples_np[:, 1], bins=100, cmap='magma',
+                     range=plot_range,
+                     norm=plt.matplotlib.colors.LogNorm())
+    fig.colorbar(im1[3], ax=ax1, label='Sample Density')
+    ax1.set_title('Training Data Density')
+    
+    # Add the sample density histogram to the other two plots with transparency
+    for ax in [ax2, ax3]:
+        ax.hist2d(samples_np[:, 0], samples_np[:, 1], bins=100, cmap='magma', range=plot_range,
+                  norm=plt.matplotlib.colors.LogNorm(), alpha=0.3)
+
+    # --- Create a grid based on data range for plotting q and g ---
+    grid_xs = np.linspace(plot_xlim[0], plot_xlim[1], cfg.GRID_NX)
+    grid_ys = np.linspace(plot_ylim[0], plot_ylim[1], cfg.GRID_NY)
+    XX, YY = np.meshgrid(grid_xs, grid_ys)
+    grid_pts = np.stack([XX.ravel(), YY.ravel()], axis=-1)
+    grid_t = torch.tensor(grid_pts, dtype=torch.float32).to(cfg.DEVICE)
+
+    # --- Evaluate model on the new grid ---
+    with torch.no_grad():
+        gA_grid, _, _, q_grid, _ = model(grid_t)
+    g_grid_np = gA_grid.cpu().numpy().reshape(cfg.GRID_NY, cfg.GRID_NX)
+    q_grid_np = q_grid.cpu().numpy().reshape(cfg.GRID_NY, cfg.GRID_NX)
+
+    # --- Plot 2: Learned Committor q(x) on Grid ---
+    im2 = ax2.imshow(q_grid_np, extent=[grid_xs[0], grid_xs[-1], grid_ys[0], grid_ys[-1]],
+                     origin='lower', cmap='coolwarm', aspect='auto', vmin=0, vmax=1)
+    fig.colorbar(im2, ax=ax2, label='Committor q(x)')
+    ax2.contour(XX, YY, q_grid_np, levels=[0.1, 0.5, 0.9], colors='black', linewidths=1.5)
+    ax2.set_title('Learned Committor q(x) on Grid')
+
+    # --- Plot 3: Learned Reaction Coordinate g(x) on Grid ---
+    im3 = ax3.imshow(g_grid_np, extent=[grid_xs[0], grid_xs[-1], grid_ys[0], grid_ys[-1]],
+                     origin='lower', cmap='viridis', aspect='auto')
+    fig.colorbar(im3, ax=ax3, label='Reaction Coordinate g(x)')
+    g_levels = np.percentile(g_grid_np, [25, 50, 75])
+    ax3.contour(XX, YY, g_grid_np, levels=g_levels, colors='white', linewidths=1.0, linestyles='--')
+    ax3.set_title('Learned RC g(x) on Grid')
+
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    plt.savefig(output_path)
+    plt.close(fig)
 
 def plot_results(model, potential, final_samples, bias_manager, output_dir):
     """

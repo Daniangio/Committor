@@ -119,13 +119,13 @@ class LangevinSampler:
                 opes_bias.check_convergence() 
 
             if prod_step % self.record_stride == 0:
-                samples.append(current_positions.cpu().clone())
+                samples.append(current_positions.detach().cpu().clone())
 
         # --- Collate and Subsample Results ---
         if not samples:
             return torch.empty(0, 2, device=self.device)
 
-        all_samples = torch.cat(samples, dim=0)
+        all_samples = torch.cat(samples, dim=0).requires_grad_(False)
         indices = torch.randperm(all_samples.size(0))
         
         if n_samples is None: # Return all collected production samples
